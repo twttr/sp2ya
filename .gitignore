@@ -1,0 +1,8 @@
+.env
+.spotify_cache
+spotify_likes.json
+transfer_progress.json
+__pycache__/
+*.pyc
+failed_matches.csv
+.venv/
