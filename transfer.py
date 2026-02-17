@@ -172,8 +172,7 @@ def find_track_on_yandex(ym, track_info):
 PROGRESS_PATH = "transfer_progress.json"
 
 
-def save_progress(matched):
-    data = {m["track"]["spotify_uri"]: m["yandex_id"] for m in matched}
+def save_progress(data):
     with open(PROGRESS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -182,7 +181,14 @@ def load_progress():
     if not os.path.exists(PROGRESS_PATH):
         return {}
     with open(PROGRESS_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        raw = json.load(f)
+    migrated = {}
+    for uri, value in raw.items():
+        if isinstance(value, str):
+            migrated[uri] = {"yandex_id": value, "liked": False}
+        else:
+            migrated[uri] = value
+    return migrated
 
 
 def write_failures_csv(failed_tracks, path="failed_matches.csv"):
@@ -218,20 +224,45 @@ def transfer_likes(sp, ym, dry_run=False, refresh=False):
 
     progress = load_progress()
     if progress:
-        print(f"Found progress file with {len(progress)} previously matched tracks.\n")
+        liked_count = sum(1 for v in progress.values() if v.get("liked"))
+        unliked_count = sum(1 for v in progress.values() if not v.get("liked"))
+        print(f"Found progress: {liked_count} liked, {unliked_count} matched but not yet liked.\n")
 
-    all_matched = []
     pending_like = []
-    skipped = []
+    new_matched = 0
+    skipped_done = 0
     failed = []
     batch_size = 20
+
+    for uri, entry in progress.items():
+        if not entry.get("liked"):
+            pending_like.append(entry["yandex_id"])
+
+    if not dry_run and pending_like:
+        print(f"Retrying {len(pending_like)} previously matched but unliked tracks...")
+        for start in range(0, len(pending_like), batch_size):
+            batch = pending_like[start : start + batch_size]
+            try:
+                like_tracks_on_yandex(ym, batch)
+                for ym_id in batch:
+                    for uri, entry in progress.items():
+                        if entry["yandex_id"] == ym_id:
+                            entry["liked"] = True
+                print(f"  >> Liked {min(start + batch_size, len(pending_like))} / {len(pending_like)}")
+            except Exception as e:
+                print(f"  >> Warning: like failed: {e}")
+            save_progress(progress)
+            time.sleep(1)
+        pending_like = []
+
+    pending_like_entries = []
 
     for i, track in enumerate(tracks, 1):
         label = f"{track['artists']} - {track['name']}"
         uri = track["spotify_uri"]
 
         if uri in progress:
-            skipped.append({"track": track, "yandex_id": progress[uri]})
+            skipped_done += 1
             continue
 
         print(f"[{i}/{len(tracks)}] {label}", end=" ")
@@ -245,44 +276,48 @@ def transfer_likes(sp, ym, dry_run=False, refresh=False):
 
         if ym_track_id:
             print("-> MATCHED")
-            entry = {"track": track, "yandex_id": ym_track_id}
-            all_matched.append(entry)
-            pending_like.append(entry)
+            new_matched += 1
+            progress[uri] = {"yandex_id": ym_track_id, "liked": False}
+            pending_like_entries.append(uri)
         else:
             print("-> NOT FOUND")
             failed.append(track)
 
-        if not dry_run and len(pending_like) >= batch_size:
-            track_ids = [str(m["yandex_id"]) for m in pending_like]
+        if not dry_run and len(pending_like_entries) >= batch_size:
+            track_ids = [progress[u]["yandex_id"] for u in pending_like_entries]
             try:
                 like_tracks_on_yandex(ym, track_ids)
+                for u in pending_like_entries:
+                    progress[u]["liked"] = True
                 print(f"  >> Liked {len(track_ids)} tracks on Yandex Music")
             except Exception as e:
                 print(f"  >> Warning: like failed: {e}")
-            save_progress(skipped + all_matched)
-            pending_like = []
+            save_progress(progress)
+            pending_like_entries = []
             time.sleep(1)
 
         if i % 10 == 0:
             time.sleep(0.3)
 
-    if not dry_run and pending_like:
-        track_ids = [str(m["yandex_id"]) for m in pending_like]
+    if not dry_run and pending_like_entries:
+        track_ids = [progress[u]["yandex_id"] for u in pending_like_entries]
         try:
             like_tracks_on_yandex(ym, track_ids)
+            for u in pending_like_entries:
+                progress[u]["liked"] = True
             print(f"  >> Liked {len(track_ids)} tracks on Yandex Music")
         except Exception as e:
             print(f"  >> Warning: like failed: {e}")
 
     if not dry_run:
-        save_progress(skipped + all_matched)
+        save_progress(progress)
 
     total = len(tracks)
     print(f"\nDone!")
-    print(f"  Matched & liked: {len(all_matched)}")
-    print(f"  Previously done:  {len(skipped)}")
-    print(f"  Failed:           {len(failed)}")
-    print(f"  Total:            {total}")
+    print(f"  New matched & liked: {new_matched}")
+    print(f"  Previously done:     {skipped_done}")
+    print(f"  Failed:              {len(failed)}")
+    print(f"  Total:               {total}")
 
     if dry_run:
         print("\n(Dry run — nothing was liked on Yandex Music)")
@@ -290,7 +325,7 @@ def transfer_likes(sp, ym, dry_run=False, refresh=False):
     if failed:
         write_failures_csv(failed)
 
-    return all_matched, failed
+    return new_matched, failed
 
 
 def main():
