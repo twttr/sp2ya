@@ -1,4 +1,5 @@
 spotipy>=2.24.0
 yandex-music>=2.2.0
+ytmusicapi>=1.11.0
 python-dotenv>=1.0.0
 thefuzz[speedup]>=0.22.0

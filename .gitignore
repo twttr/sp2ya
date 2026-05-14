@@ -1,8 +1,15 @@
 .env
 .spotify_cache
+.claude/
 spotify_likes.json
 transfer_progress.json
 __pycache__/
 *.pyc
 failed_matches.csv
 .venv/
+yandex_likes.json
+unified_likes.json
+youtube_transfer_progress.json
+youtube_failed_matches.csv
+oauth.json
+browser.json

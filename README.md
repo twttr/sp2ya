@@ -1,22 +1,22 @@
 # sp2ya
 
-Transfer liked songs from Spotify to Yandex Music.
+Transfer liked songs between music streaming services.
 
-Fetches your Spotify liked songs library, matches each track on Yandex Music using exact and fuzzy search, and adds them to your Yandex Music favorites.
+Originally built for Spotify → Yandex Music. Now also supports Yandex Music → YouTube Music (using a Spotify CSV backup enriched with any newer Yandex-only likes).
 
 ## Features
 
 - Two-pass matching: exact search, then fuzzy matching with configurable threshold
 - Resumable transfers with progress tracking — safe to interrupt and restart
-- Spotify tracks cached locally to avoid repeated API calls
+- Source tracks cached locally to avoid repeated API calls
 - Unmatched tracks logged to CSV for manual review
 - Dry-run mode for testing without side effects
 
 ## Prerequisites
 
 - Python 3.8+
-- A [Spotify Developer](https://developer.spotify.com/dashboard) account
-- A [Yandex Music](https://music.yandex.com) account
+- For the Spotify → Yandex flow: a [Spotify Developer](https://developer.spotify.com/dashboard) account and a [Yandex Music](https://music.yandex.com) account
+- For the Yandex → YouTube Music flow: a [Yandex Music](https://music.yandex.com) account (to fetch current likes), a Spotify CSV backup, and a logged-in YouTube Music browser session
 
 ## Setup
 
@@ -28,72 +28,125 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure Spotify
+### 2. Create `.env`
+
+```
+SPOTIFY_CLIENT_ID=your_spotify_client_id
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
+YANDEX_MUSIC_TOKEN=your_yandex_token
+```
+
+YouTube Music doesn't need any `.env` entries — it uses a `browser.json` file generated from your logged-in browser session (see below).
+
+Per-service setup details below — only fill in what you need for the flow you're using.
+
+### Spotify (live API)
 
 1. Go to https://developer.spotify.com/dashboard
-2. Click **Create App**
-3. Set the redirect URI to `http://127.0.0.1:8888/callback`
-4. Check **Web API** under "Which API/SDKs are you planning to use?"
-5. Copy the **Client ID**
+2. Create App, set redirect URI to `http://127.0.0.1:8888/callback`, enable Web API
+3. Copy the **Client ID** → `SPOTIFY_CLIENT_ID`
 
-> **Note:** Your Spotify app starts in Development Mode. You need to add your Spotify account email under **Settings > User Management** in the dashboard.
-
-### 3. Configure Yandex Music
+### Yandex Music
 
 1. Install the token browser extension: https://github.com/MarshalX/yandex-music-token
 2. Log in to Yandex Music in your browser
-3. The extension will display your OAuth token — copy it
+3. Copy the displayed OAuth token → `YANDEX_MUSIC_TOKEN`
 
-> **Note:** Yandex Music has no official public API. This tool uses the community-maintained [yandex-music](https://github.com/MarshalX/yandex-music-api) library. Tokens may expire after ~90 days.
+Tokens may expire after ~90 days.
 
-### 4. Create `.env` file
+### YouTube Music (browser auth)
 
+Google [disabled OAuth](https://github.com/sigma67/ytmusicapi/issues/676) for third-party YouTube Music clients in late 2024, so we use browser cookies instead. The cookies typically last weeks to months.
+
+1. Open https://music.youtube.com in an **incognito / private** window and sign in. (Incognito so regular browsing doesn't rotate the cookies you're about to capture.)
+2. Open dev tools (F12 or Cmd+Option+I) → **Network** tab.
+3. Click around in YT Music to generate requests. Find a POST request whose URL contains `/youtubei/v1/` (e.g. `next`, `browse`, `search`).
+4. Right-click that request → **Copy → Copy as cURL** (Chrome/Edge) or **Copy Request Headers** (Firefox/Safari).
+5. Generate `browser.json`:
+
+```bash
+source .venv/bin/activate
+ytmusicapi browser
 ```
-SPOTIFY_CLIENT_ID=your_client_id_here
-SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
-YANDEX_MUSIC_TOKEN=your_yandex_token_here
+
+Paste the headers when prompted; press Enter, then Ctrl-D, then Enter to finish.
+
+If your terminal eats Ctrl-D after a paste, dump the clipboard to a file and feed it directly:
+
+```bash
+pbpaste > /tmp/yt_headers.txt
+python -c "from ytmusicapi.auth.browser import setup_browser; setup_browser(filepath='browser.json', headers_raw=open('/tmp/yt_headers.txt').read())"
+rm /tmp/yt_headers.txt
 ```
+
+When the cookies eventually expire, the transfer script will start returning auth errors — just repeat the steps above to refresh `browser.json`.
 
 ## Usage
 
+All commands assume the venv is active. Activate it once per shell session:
+
 ```bash
-# Full transfer
-python transfer.py
+source .venv/bin/activate
+```
 
-# Test matching without liking anything
-python transfer.py --dry-run
+### Spotify → Yandex Music (live)
 
-# Re-fetch tracks from Spotify (ignores cache)
-python transfer.py --refresh
-
-# Stricter matching (default: 75)
+```bash
+source .venv/bin/activate
+python transfer.py              # full transfer
+python transfer.py --dry-run    # match only, don't like on Yandex
+python transfer.py --refresh    # re-fetch Spotify (ignores cache)
 python transfer.py --fuzzy-threshold 85
 ```
 
 On first run, a browser window opens for Spotify authorization. After that, the token is cached.
 
-## Resuming interrupted transfers
+### Yandex Music → YouTube Music (via Spotify backup + Yandex enrichment)
 
-The script saves progress to `transfer_progress.json` after each batch. If the transfer is interrupted (crash, network error, Ctrl+C), just run `python transfer.py` again — it will skip already-processed tracks and continue where it left off.
+Step 1 — build a unified list from your Spotify CSV backup plus current Yandex likes:
+
+```bash
+source .venv/bin/activate
+python enrich.py --spotify-csv ~/Downloads/spotify_playlists_2026_02_06/Liked_Songs.csv
+```
+
+This writes `unified_likes.json` (deduped by normalized artist + title, oldest-first). The Yandex fetch is cached in `yandex_likes.json`; pass `--refresh-yandex` to re-fetch.
+
+Step 2 — push the unified list to YouTube Music:
+
+```bash
+source .venv/bin/activate
+python transfer_youtube.py                    # full transfer
+python transfer_youtube.py --dry-run          # match only, don't like
+python transfer_youtube.py --fuzzy-threshold 85
+```
+
+Progress is saved to `youtube_transfer_progress.json` after each batch — safe to interrupt and restart.
 
 ## Output files
 
 | File | Description |
 |---|---|
-| `spotify_likes.json` | Cached Spotify liked tracks (use `--refresh` to update) |
-| `transfer_progress.json` | Tracks already matched and liked on Yandex Music |
-| `failed_matches.csv` | Tracks that could not be found on Yandex Music |
+| `spotify_likes.json` | Cached Spotify liked tracks (Spotify → Yandex flow) |
+| `transfer_progress.json` | Yandex transfer progress |
+| `failed_matches.csv` | Tracks not found on Yandex |
+| `yandex_likes.json` | Cached current Yandex liked tracks |
+| `unified_likes.json` | Merged Spotify CSV + Yandex likes (input to YouTube transfer) |
+| `youtube_transfer_progress.json` | YouTube Music transfer progress |
+| `youtube_failed_matches.csv` | Tracks not found on YouTube Music |
 
 ## How matching works
 
-1. **Exact search**: queries Yandex Music with `"Artist - Track Name"` and takes the first result
-2. **Fuzzy search**: normalizes strings (strips feat., brackets, punctuation), searches again, and compares the top 5 results using token-sorted fuzzy matching on artist and title. Accepts matches scoring above the threshold (default 75/100)
+1. **Exact search**: queries the target service with `"Artist - Track Name"` and takes the first result
+2. **Fuzzy search**: normalizes strings (strips feat., brackets, punctuation) and compares the top 5 results using token-sorted fuzzy matching on artist + title. Accepts matches scoring above the threshold (default 75/100)
+
+YouTube Music also falls back from the `songs` filter to the `videos` filter, since some niche or older tracks only exist as user-uploaded videos.
 
 ## Limitations
 
-- Some tracks may not exist on Yandex Music due to licensing differences
-- Artists with different names across platforms (e.g. Latin vs Cyrillic) may not match automatically — these are logged to `failed_matches.csv`
-- Yandex Music token expires periodically (~90 days) and must be re-extracted
+- Some tracks may not exist on the target service due to licensing differences
+- Artists with different names across platforms (e.g. Latin vs Cyrillic) may not match automatically — these are logged to the failures CSV
+- Tokens expire periodically (Yandex ~90 days; YouTube Music browser cookies usually last weeks-to-months)
 - Large libraries (5000+ tracks) take a while due to rate limiting
 
 ## License
