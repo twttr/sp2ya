@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from thefuzz import fuzz
 from ytmusicapi import YTMusic, OAuthCredentials
 
-from common import load_json, normalize, save_json
+from common import latin_normalize, load_json, normalize, save_json
 
 UNIFIED_CACHE_PATH = "unified_likes.json"
 PROGRESS_PATH = "youtube_transfer_progress.json"
@@ -93,11 +93,13 @@ def score_candidate(target_artist, target_title, candidate):
     artists_list = candidate.get("artists") or []
     artist_name = artists_list[0]["name"] if artists_list else ""
 
-    artist_score = fuzz.token_sort_ratio(
-        normalize(target_artist), normalize(artist_name)
+    artist_score = max(
+        fuzz.token_sort_ratio(normalize(target_artist), normalize(artist_name)),
+        fuzz.token_sort_ratio(latin_normalize(target_artist), latin_normalize(artist_name)),
     )
-    title_score = fuzz.token_sort_ratio(
-        normalize(target_title), normalize(title)
+    title_score = max(
+        fuzz.token_sort_ratio(normalize(target_title), normalize(title)),
+        fuzz.token_sort_ratio(latin_normalize(target_title), latin_normalize(title)),
     )
     return (artist_score + title_score) / 2
 
@@ -120,7 +122,32 @@ def best_match(results, target_artist, target_title, threshold):
     return None, best_score
 
 
-def find_track_on_youtube(yt, track_info, threshold):
+def best_title_only_match(results, target_title, threshold):
+    norm_target = normalize(target_title)
+    latin_target = latin_normalize(target_title)
+    if len(norm_target.split()) < 3 and len(latin_target.split()) < 3:
+        return None
+    best_id = None
+    best_score = 0
+    for r in results:
+        video_id = r.get("videoId")
+        if not video_id:
+            continue
+        candidate_raw = r.get("title") or ""
+        for target, candidate in (
+            (norm_target, normalize(candidate_raw)),
+            (latin_target, latin_normalize(candidate_raw)),
+        ):
+            set_score = fuzz.token_set_ratio(target, candidate)
+            sort_score = fuzz.token_sort_ratio(target, candidate)
+            score = min(set_score, sort_score + 25)
+            if score > best_score:
+                best_score = score
+                best_id = video_id
+    return best_id if best_score >= threshold else None
+
+
+def find_track_on_youtube(yt, track_info, threshold, title_only_threshold=None):
     first_artist = (track_info.get("artists") or "").split(",")[0].strip()
     name = track_info.get("name") or ""
     if not first_artist and not name:
@@ -137,14 +164,32 @@ def find_track_on_youtube(yt, track_info, threshold):
         return match_id
 
     try:
-        results = yt.search(query, filter="videos", limit=5)
+        videos_results = yt.search(query, filter="videos", limit=5)
     except Exception:
-        results = []
-    match_id, _ = best_match(results, first_artist, name, threshold)
-    return match_id
+        videos_results = []
+    match_id, _ = best_match(videos_results, first_artist, name, threshold)
+    if match_id:
+        return match_id
+
+    if title_only_threshold is None:
+        return None
+
+    try:
+        title_results = yt.search(name, filter="videos", limit=10)
+    except Exception:
+        title_results = []
+    match_id = best_title_only_match(title_results, name, title_only_threshold)
+    if match_id:
+        return match_id
+
+    try:
+        title_results = yt.search(name, filter="songs", limit=10)
+    except Exception:
+        title_results = []
+    return best_title_only_match(title_results, name, title_only_threshold)
 
 
-def transfer_to_youtube(yt, tracks, dry_run, threshold):
+def transfer_to_youtube(yt, tracks, dry_run, threshold, title_only_threshold=None):
     progress = load_progress()
     if progress:
         liked = sum(1 for v in progress.values() if v.get("liked"))
@@ -189,7 +234,7 @@ def transfer_to_youtube(yt, tracks, dry_run, threshold):
         print(f"[{i}/{len(tracks)}] {label}", end=" ")
 
         try:
-            video_id = find_track_on_youtube(yt, track, threshold)
+            video_id = find_track_on_youtube(yt, track, threshold, title_only_threshold)
         except Exception as e:
             print(f"-> ERROR ({e})")
             failed.append(track)
@@ -259,6 +304,12 @@ def main():
         default=DEFAULT_FUZZY_THRESHOLD,
         help=f"Minimum fuzzy match score 0-100 (default: {DEFAULT_FUZZY_THRESHOLD})",
     )
+    parser.add_argument(
+        "--title-only-threshold",
+        type=int,
+        default=None,
+        help="Enable title-only fallback (artist ignored) when strict matching fails, with this token_set_ratio threshold (e.g. 80). Requires target title to have ≥3 normalized words. Off by default — recommended only for retrying failures (false-positive risk is higher than strict mode).",
+    )
     args = parser.parse_args()
 
     tracks = load_json(args.input)
@@ -268,7 +319,13 @@ def main():
     print(f"Loaded {len(tracks)} tracks from {args.input}.\n")
 
     yt = get_youtube_client()
-    transfer_to_youtube(yt, tracks, dry_run=args.dry_run, threshold=args.fuzzy_threshold)
+    transfer_to_youtube(
+        yt,
+        tracks,
+        dry_run=args.dry_run,
+        threshold=args.fuzzy_threshold,
+        title_only_threshold=args.title_only_threshold,
+    )
 
 
 if __name__ == "__main__":

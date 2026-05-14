@@ -3,6 +3,8 @@ import os
 import re
 import unicodedata
 
+from unidecode import unidecode
+
 
 def normalize(text):
     if not text:
@@ -15,6 +17,10 @@ def normalize(text):
     text = re.sub(r"[^\w\s]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def latin_normalize(text):
+    return normalize(unidecode(text or ""))
 
 
 def loose_title(text):
