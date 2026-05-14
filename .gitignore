@@ -8,6 +8,7 @@ __pycache__/
 failed_matches.csv
 .venv/
 yandex_likes.json
+soundcloud_likes.json
 unified_likes.json
 youtube_transfer_progress.json
 youtube_failed_matches.csv

@@ -4,6 +4,7 @@ import os
 import sys
 import time
 
+import requests
 from dotenv import load_dotenv
 from yandex_music import Client as YMClient
 
@@ -11,6 +12,8 @@ from common import artist_tokens, load_json, loose_title, save_json
 
 UNIFIED_CACHE_PATH = "unified_likes.json"
 YANDEX_CACHE_PATH = "yandex_likes.json"
+SOUNDCLOUD_CACHE_PATH = "soundcloud_likes.json"
+SOUNDCLOUD_API = "https://api-v2.soundcloud.com"
 
 
 def get_yandex_client():
@@ -93,43 +96,84 @@ def fetch_yandex_liked_tracks(ym):
     return tracks
 
 
-def merge_tracks(spotify_tracks, yandex_tracks):
-    spotify_by_title = {}
-    spotify_unique = []
-    spotify_self_dupes = 0
-    seen_self = set()
+def fetch_soundcloud_liked_tracks():
+    token = os.getenv("SC_OAUTH_TOKEN")
+    client_id = os.getenv("SC_CLIENT_ID")
+    if not token or not client_id:
+        print("SC_OAUTH_TOKEN / SC_CLIENT_ID not set in .env — skipping SoundCloud.")
+        return []
 
-    for t in spotify_tracks:
-        title = loose_title(t["name"])
-        tokens = artist_tokens(t["artists"])
-        if any(tokens & artist_tokens(c["artists"]) for c in spotify_by_title.get(title, [])):
-            spotify_self_dupes += 1
-            continue
-        spotify_by_title.setdefault(title, []).append(t)
-        spotify_unique.append(t)
+    print("Fetching liked tracks from SoundCloud...")
+    session = requests.Session()
+    session.headers.update({"Authorization": f"OAuth {token}"})
 
-    unified = list(spotify_unique)
-    yandex_added = 0
-    yandex_skipped = 0
+    me = session.get(f"{SOUNDCLOUD_API}/me", params={"client_id": client_id})
+    if me.status_code != 200:
+        print(f"  Auth failed ({me.status_code}). Refresh SC_OAUTH_TOKEN / SC_CLIENT_ID.")
+        return []
+    user_id = me.json().get("id")
+    if not user_id:
+        print("  Could not resolve SoundCloud user id.")
+        return []
 
-    for t in yandex_tracks:
-        title = loose_title(t["name"])
-        tokens = artist_tokens(t["artists"])
-        if any(tokens & artist_tokens(c["artists"]) for c in spotify_by_title.get(title, [])):
-            yandex_skipped += 1
-            continue
-        spotify_by_title.setdefault(title, []).append(t)
-        unified.append(t)
-        yandex_added += 1
+    url = f"{SOUNDCLOUD_API}/users/{user_id}/track_likes"
+    params = {"client_id": client_id, "limit": 200}
+
+    tracks = []
+    while url:
+        resp = session.get(url, params=params if params else None)
+        if resp.status_code != 200:
+            print(f"  Request failed ({resp.status_code}); stopping at {len(tracks)} fetched.")
+            break
+        data = resp.json()
+        for item in data.get("collection", []):
+            track = item.get("track") or {}
+            track_id = track.get("id")
+            if not track_id:
+                continue
+            user = track.get("user") or {}
+            tracks.append({
+                "id": f"soundcloud:track:{track_id}",
+                "name": track.get("title") or "",
+                "artists": user.get("username") or "",
+                "album": "",
+                "duration_ms": track.get("duration") or 0,
+                "added_at": item.get("created_at") or "",
+                "source": "soundcloud",
+                "soundcloud_id": track_id,
+                "soundcloud_url": track.get("permalink_url") or "",
+            })
+        print(f"  Fetched {len(tracks)} tracks...")
+        url = data.get("next_href")
+        params = {}
+        time.sleep(0.3)
+    return tracks
+
+
+def merge_tracks(*source_lists):
+    title_index = {}
+    unified = []
+    stats = {}
+
+    for source_tracks in source_lists:
+        for t in source_tracks:
+            source = t.get("source", "unknown")
+            bucket = stats.setdefault(source, {"added": 0, "dupes": 0})
+            title = loose_title(t["name"])
+            tokens = artist_tokens(t["artists"])
+            if any(tokens & artist_tokens(c["artists"]) for c in title_index.get(title, [])):
+                bucket["dupes"] += 1
+                continue
+            title_index.setdefault(title, []).append(t)
+            unified.append(t)
+            bucket["added"] += 1
 
     unified.sort(key=lambda t: t.get("added_at") or "")
 
     print(f"\nMerge summary:")
-    print(f"  From Spotify CSV (unique): {len(spotify_unique)}")
-    print(f"  Spotify self-dupes:        {spotify_self_dupes}")
-    print(f"  Yandex-only (added):       {yandex_added}")
-    print(f"  Yandex dupes (skipped):    {yandex_skipped}")
-    print(f"  Total unified:             {len(unified)}")
+    for source, counts in stats.items():
+        print(f"  {source:12s} added={counts['added']:5d}  dupes={counts['dupes']:5d}")
+    print(f"  Total unified: {len(unified)}")
     return unified
 
 
@@ -148,6 +192,16 @@ def main():
         "--refresh-yandex",
         action="store_true",
         help="Re-fetch Yandex likes (default: reuse yandex_likes.json if present)",
+    )
+    parser.add_argument(
+        "--soundcloud",
+        action="store_true",
+        help="Also fetch likes from SoundCloud (needs SC_OAUTH_TOKEN and SC_CLIENT_ID in .env)",
+    )
+    parser.add_argument(
+        "--refresh-soundcloud",
+        action="store_true",
+        help="Re-fetch SoundCloud likes (default: reuse soundcloud_likes.json if present)",
     )
     parser.add_argument(
         "--output",
@@ -174,7 +228,19 @@ def main():
         save_json(YANDEX_CACHE_PATH, yandex_tracks)
         print(f"  Saved Yandex likes to {YANDEX_CACHE_PATH}")
 
-    unified = merge_tracks(spotify_tracks, yandex_tracks)
+    soundcloud_tracks = []
+    if args.soundcloud:
+        cached_sc = None if args.refresh_soundcloud else load_json(SOUNDCLOUD_CACHE_PATH)
+        if cached_sc:
+            print(f"Using cached SoundCloud likes ({len(cached_sc)} tracks). Use --refresh-soundcloud to re-fetch.")
+            soundcloud_tracks = cached_sc
+        else:
+            soundcloud_tracks = fetch_soundcloud_liked_tracks()
+            if soundcloud_tracks:
+                save_json(SOUNDCLOUD_CACHE_PATH, soundcloud_tracks)
+                print(f"  Saved SoundCloud likes to {SOUNDCLOUD_CACHE_PATH}")
+
+    unified = merge_tracks(spotify_tracks, yandex_tracks, soundcloud_tracks)
     save_json(args.output, unified)
     print(f"\nWrote {len(unified)} unified tracks to {args.output}")
 

@@ -34,6 +34,8 @@ pip install -r requirements.txt
 SPOTIFY_CLIENT_ID=your_spotify_client_id
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
 YANDEX_MUSIC_TOKEN=your_yandex_token
+SC_OAUTH_TOKEN=your_soundcloud_oauth_token        # only if --soundcloud
+SC_CLIENT_ID=your_soundcloud_client_id            # only if --soundcloud
 ```
 
 YouTube Music doesn't need any `.env` entries — it uses a `browser.json` file generated from your logged-in browser session (see below).
@@ -53,6 +55,20 @@ Per-service setup details below — only fill in what you need for the flow you'
 3. Copy the displayed OAuth token → `YANDEX_MUSIC_TOKEN`
 
 Tokens may expire after ~90 days.
+
+### SoundCloud (optional, browser auth)
+
+The official SoundCloud API requires a paid Artist Pro subscription to register an app, so we use the internal v2 API the website itself calls.
+
+1. Open https://soundcloud.com in an **incognito** window and sign in.
+2. Open dev tools → **Network** tab.
+3. Click around (open your library, play something) to generate API requests to `api-v2.soundcloud.com`.
+4. Click any such request. In the headers, find:
+   - `Authorization: OAuth <token>` — copy the token (everything after `OAuth `) into `SC_OAUTH_TOKEN`.
+   - The request URL contains `client_id=<32-char string>` — copy into `SC_CLIENT_ID`.
+5. Add both to `.env`, then run `enrich.py --soundcloud`.
+
+Tokens last a few weeks to months; refresh when the script reports auth failure.
 
 ### YouTube Music (browser auth)
 
@@ -103,14 +119,15 @@ On first run, a browser window opens for Spotify authorization. After that, the 
 
 ### Yandex Music → YouTube Music (via Spotify backup + Yandex enrichment)
 
-Step 1 — build a unified list from your Spotify CSV backup plus current Yandex likes:
+Step 1 — build a unified list from your Spotify CSV backup plus current Yandex likes (and optionally SoundCloud):
 
 ```bash
 source .venv/bin/activate
 python enrich.py --spotify-csv ~/Downloads/spotify_playlists_2026_02_06/Liked_Songs.csv
+python enrich.py --spotify-csv ~/Downloads/spotify_playlists_2026_02_06/Liked_Songs.csv --soundcloud
 ```
 
-This writes `unified_likes.json` (deduped by normalized artist + title, oldest-first). The Yandex fetch is cached in `yandex_likes.json`; pass `--refresh-yandex` to re-fetch.
+This writes `unified_likes.json` (deduped by normalized artist + title, oldest-first). The Yandex fetch is cached in `yandex_likes.json`; pass `--refresh-yandex` to re-fetch. SoundCloud is cached in `soundcloud_likes.json`; pass `--refresh-soundcloud` to re-fetch.
 
 Step 2 — push the unified list to YouTube Music:
 
@@ -131,7 +148,8 @@ Progress is saved to `youtube_transfer_progress.json` after each batch — safe 
 | `transfer_progress.json` | Yandex transfer progress |
 | `failed_matches.csv` | Tracks not found on Yandex |
 | `yandex_likes.json` | Cached current Yandex liked tracks |
-| `unified_likes.json` | Merged Spotify CSV + Yandex likes (input to YouTube transfer) |
+| `soundcloud_likes.json` | Cached current SoundCloud liked tracks (if `--soundcloud`) |
+| `unified_likes.json` | Merged Spotify CSV + Yandex (+ SoundCloud) likes (input to YouTube transfer) |
 | `youtube_transfer_progress.json` | YouTube Music transfer progress |
 | `youtube_failed_matches.csv` | Tracks not found on YouTube Music |
 
