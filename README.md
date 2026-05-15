@@ -140,6 +140,50 @@ python transfer_youtube.py --fuzzy-threshold 85
 
 Progress is saved to `youtube_transfer_progress.json` after each batch — safe to interrupt and restart.
 
+#### Recovering failed matches
+
+After the main pass, the failures CSV typically still contains a few hundred tracks. Two extra passes help:
+
+```bash
+# Looser fuzzy threshold + title-only fallback for SC-style "Uploader - Artist - Title" tracks
+python transfer_youtube.py --fuzzy-threshold 65 --title-only-threshold 80
+
+# Parse "Uploader - Artist - Title" patterns out of the name field and re-search.
+# Targets SoundCloud uploads where the SC artist is the uploader, not the original.
+python retry_smart.py
+```
+
+`--title-only-threshold 80` is opt-in because it has a higher false-positive rate; audit your Liked Music afterward.
+
+### Recreating Spotify playlist CSVs as YouTube Music playlists
+
+If your Spotify export includes playlist CSVs (`Your_Top_Songs_2018.csv`, etc.), recreate them on YouTube Music with the same migration matcher:
+
+```bash
+python create_playlists.py path/to/Your_Top_Songs_*.csv
+python create_playlists.py path/to/playlists/*.csv --privacy PUBLIC --dry-run
+```
+
+Reuses video IDs from `youtube_transfer_progress.json` when available; falls back to a fresh search for new tracks.
+
+### Comparing libraries + auditing for duplicates and weird matches
+
+```bash
+# Show what's in unified but not in your current YT Music likes, and vice versa.
+python compare_libraries.py
+
+# Find probable false-positive matches (artist mismatch) and duplicates inside YT Music.
+python audit_youtube.py
+```
+
+### Building a single canonical source-of-truth file
+
+```bash
+# Merges youtube_likes.json + yandex_likes.json + soundcloud_likes.json into
+# one deduplicated JSON + CSV with platform IDs for each track.
+python build_canonical.py
+```
+
 ## Output files
 
 | File | Description |
@@ -150,15 +194,21 @@ Progress is saved to `youtube_transfer_progress.json` after each batch — safe 
 | `yandex_likes.json` | Cached current Yandex liked tracks |
 | `soundcloud_likes.json` | Cached current SoundCloud liked tracks (if `--soundcloud`) |
 | `unified_likes.json` | Merged Spotify CSV + Yandex (+ SoundCloud) likes (input to YouTube transfer) |
-| `youtube_transfer_progress.json` | YouTube Music transfer progress |
+| `youtube_likes.json` | Cached current YouTube Music liked tracks (written by `compare_libraries.py`) |
+| `youtube_transfer_progress.json` | YouTube Music transfer progress — keys: source track id, values: `{video_id, liked}` |
 | `youtube_failed_matches.csv` | Tracks not found on YouTube Music |
+| `canonical_library.json` / `.csv` | Deduplicated merge of YT + Yandex + SoundCloud (written by `build_canonical.py`) |
+| `audit_suspicious_matches.csv` | Migration matches with low artist similarity — worth spot-checking |
+| `audit_duplicates.csv` | Groups of duplicate liked songs on YT Music |
+| `browser.json` | YouTube Music browser-cookie auth (do not share) |
 
 ## How matching works
 
-1. **Exact search**: queries the target service with `"Artist - Track Name"` and takes the first result
-2. **Fuzzy search**: normalizes strings (strips feat., brackets, punctuation) and compares the top 5 results using token-sorted fuzzy matching on artist + title. Accepts matches scoring above the threshold (default 75/100)
+1. **Exact search**: queries the target service with `"Artist - Track Name"` and takes the first result.
+2. **Fuzzy search**: normalizes strings (strips feat., brackets, punctuation) and compares the top 5 results using token-sorted fuzzy matching on artist + title. Accepts matches scoring above the threshold (default 75/100).
+3. **Transliteration-aware scoring**: each candidate is also scored against a `unidecode`-transliterated version of the target, so Cyrillic↔Latin variants of the same track match (e.g. `Дископартизаны` ↔ `Diskopartizany`).
 
-YouTube Music also falls back from the `songs` filter to the `videos` filter, since some niche or older tracks only exist as user-uploaded videos.
+YouTube Music also falls back from the `songs` filter to the `videos` filter, since some niche or older tracks only exist as user-uploaded videos. With `--title-only-threshold` set, a final pass matches by title alone (token_set_ratio with a 3-token minimum guard) to catch SoundCloud-style uploads where the artist field is the uploader rather than the original artist.
 
 ## Limitations
 
